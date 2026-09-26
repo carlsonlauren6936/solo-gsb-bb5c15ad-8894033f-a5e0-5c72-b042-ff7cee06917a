@@ -9,6 +9,7 @@ from app.imposition import (
     build_binding_check,
     build_chapter_imposition,
     build_imposition,
+    build_manual_duplex,
     build_reprint,
     impose_padded_booklet,
     split_booklets,
@@ -590,6 +591,165 @@ class TestBuildBindingCheck(unittest.TestCase):
         self.assertEqual((result["start_page"], result["end_page"]), (17, 17))
         self.assertEqual(result["sheets"][0]["required_operations"], [])
         self.assertEqual(result["swap_steps"], [])
+
+
+class TestBuildManualDuplex(unittest.TestCase):
+    """两轮手工双面打印清单。基准：8 页 1 册 2 张纸。
+
+    S0: front 8|1  / back 2|7
+    S1: front 6|3  / back 4|5
+    """
+
+    def _entry_keys(self, round_):
+        return [
+            (e["sequence"], e["booklet_index"], e["sheet_index"])
+            for e in round_["entries"]
+        ]
+
+    def test_first_round_prints_fronts_outer_to_inner(self):
+        result = build_manual_duplex(8, 4, refill_reversed=False, flip_edge="short")
+        booklet = result["booklets"][0]
+        self.assertEqual(booklet["index"], 0)
+        self.assertEqual(booklet["sheet_count"], 2)
+        self.assertEqual(len(booklet["rounds"]), 2)
+        first, second = booklet["rounds"]
+        self.assertEqual((first["round"], first["side"]), (1, "front"))
+        self.assertEqual((second["round"], second["side"]), (2, "back"))
+        # 首轮：外到内，正面
+        self.assertEqual(self._entry_keys(first), [(0, 0, 0), (1, 0, 1)])
+        self.assertEqual(
+            [(e["left"], e["right"]) for e in first["entries"]],
+            [(8, 1), (6, 3)],
+        )
+
+    def test_second_round_short_edge_keeps_order_and_lr(self):
+        # 不回填倒序 + 短边翻转：反面同序，左右不变
+        result = build_manual_duplex(8, 4, refill_reversed=False, flip_edge="short")
+        second = result["booklets"][0]["rounds"][1]
+        self.assertEqual(self._entry_keys(second), [(0, 0, 0), (1, 0, 1)])
+        self.assertEqual(
+            [(e["left"], e["right"]) for e in second["entries"]],
+            [(2, 7), (4, 5)],
+        )
+
+    def test_reversed_refill_reverses_second_round_order(self):
+        # 倒序回填 + 短边翻转：次序 S1 -> S0，左右不变
+        result = build_manual_duplex(8, 4, refill_reversed=True, flip_edge="short")
+        second = result["booklets"][0]["rounds"][1]
+        self.assertEqual(self._entry_keys(second), [(0, 0, 1), (1, 0, 0)])
+        self.assertEqual(
+            [(e["left"], e["right"]) for e in second["entries"]],
+            [(4, 5), (2, 7)],
+        )
+
+    def test_long_edge_swaps_back_lr(self):
+        # 长边翻转：交换反面左右版面
+        result = build_manual_duplex(8, 4, refill_reversed=False, flip_edge="long")
+        second = result["booklets"][0]["rounds"][1]
+        self.assertEqual(self._entry_keys(second), [(0, 0, 0), (1, 0, 1)])
+        self.assertEqual(
+            [(e["left"], e["right"]) for e in second["entries"]],
+            [(7, 2), (5, 4)],
+        )
+
+    def test_reversed_and_long_combined(self):
+        # 倒序回填 + 长边翻转：先反序、再交换左右
+        result = build_manual_duplex(8, 4, refill_reversed=True, flip_edge="long")
+        second = result["booklets"][0]["rounds"][1]
+        self.assertEqual(self._entry_keys(second), [(0, 0, 1), (1, 0, 0)])
+        self.assertEqual(
+            [(e["left"], e["right"]) for e in second["entries"]],
+            [(5, 4), (7, 2)],
+        )
+
+    def test_first_round_unaffected_by_options(self):
+        # 回填与翻转选项只影响第二轮，首轮恒定为外到内正面
+        for reversed_ in (False, True):
+            for edge in ("short", "long"):
+                result = build_manual_duplex(8, 4, reversed_, edge)
+                first = result["booklets"][0]["rounds"][0]
+                self.assertEqual(
+                    [(e["sheet_index"], e["left"], e["right"])
+                     for e in first["entries"]],
+                    [(0, 8, 1), (1, 6, 3)],
+                )
+
+    def test_padding_blanks_stay_null(self):
+        # 5 页补齐到 8：S0 back = 2|null，S1 front = null|3、back = 4|5
+        result = build_manual_duplex(5, 10, refill_reversed=False, flip_edge="short")
+        booklet = result["booklets"][0]
+        first, second = booklet["rounds"]
+        self.assertEqual(first["entries"][0]["left"], None)
+        self.assertEqual(first["entries"][1]["left"], None)
+        self.assertEqual(second["entries"][0], {
+            "sequence": 0,
+            "booklet_index": 0,
+            "sheet_index": 0,
+            "left": 2,
+            "right": None,
+        })
+        # 长边翻转仅交换左右，null 依然为 null
+        result_long = build_manual_duplex(5, 10, True, "long")
+        back = result_long["booklets"][0]["rounds"][1]["entries"]
+        self.assertEqual(
+            [(e["sheet_index"], e["left"], e["right"]) for e in back],
+            [(1, 5, 4), (0, None, 2)],
+        )
+
+    def test_multi_booklet_each_has_independent_two_rounds(self):
+        # 17 页每册 2 张 -> 3 册，册 2 仅 1 张；每册各自两轮、序号独立
+        result = build_manual_duplex(17, 2, refill_reversed=False, flip_edge="short")
+        self.assertEqual(result["booklet_count"], 3)
+        self.assertEqual(result["total_sheets"], 5)
+        self.assertEqual([b["index"] for b in result["booklets"]], [0, 1, 2])
+        for booklet in result["booklets"]:
+            self.assertEqual(len(booklet["rounds"]), 2)
+            for round_ in booklet["rounds"]:
+                self.assertEqual(len(round_["entries"]), booklet["sheet_count"])
+                self.assertEqual(
+                    [e["booklet_index"] for e in round_["entries"]],
+                    [booklet["index"]] * booklet["sheet_count"],
+                )
+                self.assertEqual(
+                    [e["sequence"] for e in round_["entries"]],
+                    list(range(booklet["sheet_count"])),
+                )
+        # 册 1 首轮：S0 16|9 / S1 14|11（外到内）
+        self.assertEqual(
+            [(e["sheet_index"], e["left"], e["right"])
+             for e in result["booklets"][1]["rounds"][0]["entries"]],
+            [(0, 16, 9), (1, 14, 11)],
+        )
+        # 末册唯一纸：front null|17，倒序与否第二轮都只有该纸
+        last = result["booklets"][2]
+        self.assertEqual(last["sheet_count"], 1)
+        self.assertEqual(
+            (last["rounds"][0]["entries"][0]["left"],
+             last["rounds"][0]["entries"][0]["right"]),
+            (None, 17),
+        )
+
+    def test_multi_booklet_reversed_round_two(self):
+        result = build_manual_duplex(17, 2, refill_reversed=True, flip_edge="short")
+        # 册 0 两张纸，第二轮次序为 1 -> 0
+        back = result["booklets"][0]["rounds"][1]["entries"]
+        self.assertEqual([e["sheet_index"] for e in back], [1, 0])
+        # 末册一张纸，次序不变
+        self.assertEqual(
+            [e["sheet_index"] for e in result["booklets"][2]["rounds"][1]["entries"]],
+            [0],
+        )
+
+    def test_invalid_flip_edge_raises(self):
+        with self.assertRaises(ValueError):
+            build_manual_duplex(8, 4, False, "middle")
+
+    def test_summary_fields_echo_options(self):
+        result = build_manual_duplex(8, 4, refill_reversed=True, flip_edge="long")
+        self.assertEqual(result["total_pages"], 8)
+        self.assertEqual(result["max_sheets_per_booklet"], 4)
+        self.assertEqual(result["refill_reversed"], True)
+        self.assertEqual(result["flip_edge"], "long")
 
 
 class TestMinimumSwapSteps(unittest.TestCase):

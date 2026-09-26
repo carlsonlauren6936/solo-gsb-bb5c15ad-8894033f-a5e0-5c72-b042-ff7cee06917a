@@ -615,5 +615,144 @@ class TestBindingCheckEndpoint(unittest.TestCase):
                 self.assertIn("details", body)
 
 
+class TestManualDuplexEndpoint(unittest.TestCase):
+    URL = "/api/v1/manual-duplex"
+
+    def test_short_edge_same_order(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 8,
+                "max_sheets_per_booklet": 4,
+                "refill_reversed": False,
+                "flip_edge": "short",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        data = resp.json()
+        self.assertEqual(data["booklet_count"], 1)
+        self.assertEqual(data["total_sheets"], 2)
+        self.assertEqual(data["refill_reversed"], False)
+        self.assertEqual(data["flip_edge"], "short")
+        booklet = data["booklets"][0]
+        self.assertEqual(len(booklet["rounds"]), 2)
+        first, second = booklet["rounds"]
+        self.assertEqual(
+            [(e["sequence"], e["booklet_index"], e["sheet_index"])
+             for e in first["entries"]],
+            [(0, 0, 0), (1, 0, 1)],
+        )
+        self.assertEqual(
+            [(e["left"], e["right"]) for e in first["entries"]],
+            [(8, 1), (6, 3)],
+        )
+        self.assertEqual(
+            [(e["sequence"], e["sheet_index"], e["left"], e["right"])
+             for e in second["entries"]],
+            [(0, 0, 2, 7), (1, 1, 4, 5)],
+        )
+
+    def test_reversed_long_edge(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 8,
+                "max_sheets_per_booklet": 4,
+                "refill_reversed": True,
+                "flip_edge": "long",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        second = resp.json()["booklets"][0]["rounds"][1]
+        self.assertEqual(
+            [(e["sequence"], e["sheet_index"], e["left"], e["right"])
+             for e in second["entries"]],
+            [(0, 1, 5, 4), (1, 0, 7, 2)],
+        )
+
+    def test_multi_booklet_independent_rounds_and_null_padding(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 17,
+                "max_sheets_per_booklet": 2,
+                "refill_reversed": True,
+                "flip_edge": "long",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        booklets = resp.json()["booklets"]
+        self.assertEqual([b["index"] for b in booklets], [0, 1, 2])
+        for booklet in booklets:
+            self.assertEqual(len(booklet["rounds"]), 2)
+        # 册 0 两张纸第二轮反序：S1 back 4|5 -> 长边 5|4；S0 back 2|7 -> 7|2
+        back = booklets[0]["rounds"][1]["entries"]
+        self.assertEqual(
+            [(e["sheet_index"], e["left"], e["right"]) for e in back],
+            [(1, 5, 4), (0, 7, 2)],
+        )
+        # 末册仅一张纸 null|17 / null|null，长边交换反面后仍为 null|null
+        last_back = booklets[2]["rounds"][1]["entries"][0]
+        self.assertEqual(
+            (last_back["sheet_index"], last_back["left"], last_back["right"]),
+            (0, None, None),
+        )
+
+    def test_invalid_options_400(self):
+        valid = {
+            "total_pages": 8,
+            "max_sheets_per_booklet": 4,
+            "refill_reversed": False,
+            "flip_edge": "short",
+        }
+        cases = [
+            {**valid, "flip_edge": "middle"},  # 非法翻转边
+            {**valid, "flip_edge": "LONG"},  # 大小写不接受
+            {**valid, "flip_edge": 1},  # 非字符串
+            {**valid, "flip_edge": True},  # 布尔值
+            {**valid, "refill_reversed": "true"},  # 非布尔
+            {**valid, "refill_reversed": 1},  # 1 不当作 true
+            {**valid, "refill_reversed": None},  # null
+            {"total_pages": 8, "max_sheets_per_booklet": 4,
+             "flip_edge": "short"},  # 缺 refill_reversed
+            {"total_pages": 8, "max_sheets_per_booklet": 4,
+             "refill_reversed": False},  # 缺 flip_edge
+            {"total_pages": 0, **{k: v for k, v in valid.items()
+                                 if k != "total_pages"}},  # 总页数非正
+            {**valid, "total_pages": 8.0},  # 整数浮点
+            {**valid, "max_sheets_per_booklet": 0},  # 每册纸张数非正
+            {**valid, "extra": 1},  # 多余字段
+            {},  # 空请求体
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                resp = client.post(self.URL, json=payload)
+                self.assertEqual(resp.status_code, 400, payload)
+                body = resp.json()
+                self.assertEqual(body["error"], "invalid_input")
+                self.assertIn("details", body)
+
+    def test_invalid_option_messages(self):
+        resp = client.post(
+            self.URL,
+            json={"total_pages": 8, "max_sheets_per_booklet": 4,
+                  "refill_reversed": False, "flip_edge": "middle"},
+        )
+        body = resp.json()
+        self.assertTrue(
+            any(d["field"] == "flip_edge" for d in body["details"])
+        )
+        self.assertIn("short", body["details"][0]["message"])
+
+        resp = client.post(
+            self.URL,
+            json={"total_pages": 8, "max_sheets_per_booklet": 4,
+                  "refill_reversed": "yes", "flip_edge": "short"},
+        )
+        body = resp.json()
+        self.assertEqual(body["details"][0]["field"], "refill_reversed")
+        self.assertIn("布尔值", body["details"][0]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

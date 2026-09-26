@@ -17,6 +17,11 @@
 左右互换 / 正反互换还原的版面返回 **HTTP 400**；核对通过时给出每张纸当前与应在
 位置、所需互换操作，以及恢复外到内顺序的最少两两交换步骤。
 
+另可生成**每册独立的两轮手工双面打印清单**（`POST /api/v1/manual-duplex`）：
+没有自动双面打印功能时，每册先按外到内打印全部正面，再把首轮出纸堆回填进纸口
+打印反面；支持指定**首轮出纸堆是否倒序回填**（倒序则第二轮反转纸张次序）以及
+回填时**沿短边 / 长边翻转**（长边交换反面左右版面，短边保持不变）。
+
 > 1 张纸正反两面共 4 个版面，因此骑马钉册的页数永远是 4 的倍数。
 
 ---
@@ -73,6 +78,7 @@ HOST_PORT=9000
 | 补印定位接口（POST） | `POST http://localhost:8000/api/v1/reprint` |
 | 按章节分册拼版接口（POST） | `POST http://localhost:8000/api/v1/chapter-impose` |
 | 装订核对接口（POST） | `POST http://localhost:8000/api/v1/binding-check` |
+| 手工双面打印清单接口（POST） | `POST http://localhost:8000/api/v1/manual-duplex` |
 
 ## 4. 接口说明
 
@@ -496,6 +502,103 @@ curl -X POST http://localhost:8000/api/v1/binding-check \
 }
 ```
 
+### `POST /api/v1/manual-duplex`（每册独立的两轮手工双面打印清单）
+
+打印机不支持自动双面时，按本清单**每册分两轮**手工送纸：
+
+- **第一轮**：纸张按**外到内**顺序打印各自**正面**（与 `/api/v1/impose` 的
+  正面版面一致）；
+- **第二轮**：把首轮出纸堆回填进纸口，按**回填后的实际入纸顺序**打印对应**反面**：
+  - `refill_reversed: true`（倒序回填）时，第二轮纸张次序**反转**
+    （从最内侧纸印到最外侧纸）；`false` 时与首轮同序；
+  - `flip_edge: "long"`（沿长边翻转回填）时，**交换**反面的左右版面；
+    `flip_edge: "short"`（沿短边翻转回填）时左右**保持不变**。
+
+每册独立成组（`booklets[].rounds` 恒为两轮），每条记录给出**轮次内序号**
+（`sequence`，从 0 开始）、**册号**（`booklet_index`）、**纸张序号**
+（`sheet_index`，0 为最外侧纸）与本次打印的**左右页码**；补白沿用 `null`。
+
+**请求体（JSON）**
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `total_pages` | 整数 | 必填，正整数 `>= 1` | 原稿总页数（与拼版接口口径一致） |
+| `max_sheets_per_booklet` | 整数 | 必填，正整数 `>= 1` | 每册最多纸张数（与拼版接口口径一致） |
+| `refill_reversed` | 布尔 | 必填，`true` / `false` | 首轮出纸堆是否倒序回填（倒序则第二轮反转纸张次序） |
+| `flip_edge` | 字符串 | 必填，`"short"` 或 `"long"` | 回填时沿短边（左右不变）或长边（交换左右）翻转 |
+
+非法选项一律返回 **HTTP 400**：`flip_edge` 不是 `"short"` / `"long"`、
+`refill_reversed` 不是布尔值（`1`、`"true"` 等均不接受）、分册参数非正整数、
+缺失或多余字段。
+
+请求示例（8 页、每册最多 4 张纸 → 1 册 2 张纸；倒序回填 + 沿长边翻转）：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/manual-duplex \
+  -H "Content-Type: application/json" \
+  -d '{
+        "total_pages": 8,
+        "max_sheets_per_booklet": 4,
+        "refill_reversed": true,
+        "flip_edge": "long"
+      }'
+```
+
+响应示例（第二轮次序反转为内→外，且反面左右版面互换）：
+
+```json
+{
+  "total_pages": 8,
+  "max_sheets_per_booklet": 4,
+  "refill_reversed": true,
+  "flip_edge": "long",
+  "booklet_count": 1,
+  "total_sheets": 2,
+  "booklets": [
+    {
+      "index": 0,
+      "sheet_count": 2,
+      "rounds": [
+        {
+          "round": 1,
+          "side": "front",
+          "entries": [
+            { "sequence": 0, "booklet_index": 0, "sheet_index": 0, "left": 8, "right": 1 },
+            { "sequence": 1, "booklet_index": 0, "sheet_index": 1, "left": 6, "right": 3 }
+          ]
+        },
+        {
+          "round": 2,
+          "side": "back",
+          "entries": [
+            { "sequence": 0, "booklet_index": 0, "sheet_index": 1, "left": 5, "right": 4 },
+            { "sequence": 1, "booklet_index": 0, "sheet_index": 0, "left": 7, "right": 2 }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+非法选项错误响应示例（`flip_edge` 取值不合法）：
+
+```bash
+curl -i -X POST http://localhost:8000/api/v1/manual-duplex \
+  -H "Content-Type: application/json" \
+  -d '{"total_pages": 8, "max_sheets_per_booklet": 4, "refill_reversed": false, "flip_edge": "middle"}'
+```
+
+```json
+{
+  "error": "invalid_input",
+  "message": "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数，refill_reversed 必须是布尔值，flip_edge 必须是 \"short\" 或 \"long\"。",
+  "details": [
+    { "field": "flip_edge", "message": "必须为 \"short\"（短边翻转）或 \"long\"（长边翻转）。" }
+  ]
+}
+```
+
 ## 5. 拼版规则（打印与装订说明）
 
 对一册补齐到 `n` 页（`n` 为 4 的倍数）的小册子，从外到内第 `i` 张纸
@@ -517,6 +620,10 @@ curl -X POST http://localhost:8000/api/v1/binding-check \
 每册页数不超过 `4 × max_sheets_per_booklet`；在所有合法方案中依次最小化
 总纸张数、册数，并以各册结束章节序号序列的字典序裁决并列。每册独立补齐到
 4 的倍数（可能每册都有补白页），页码为跨册连续的全局原稿页码。
+
+**手工双面打印**（`/api/v1/manual-duplex`）：无自动双面功能时，每册分两轮送纸——
+首轮按外到内打印正面；随后把出纸堆回填进纸口打印反面。倒序回填时第二轮纸张
+次序反转；沿长边翻转回填时交换反面左右版面，沿短边翻转时左右不变。
 
 ## 6. 本地开发（不使用 Docker）
 
@@ -542,9 +649,9 @@ python -m unittest discover -s tests -v
 .
 ├── app/
 │   ├── __init__.py
-│   ├── imposition.py      # 分册 / 补齐 / 拼版核心算法 + 补印定位 + 按章节最优分册 + 装订核对（纯标准库）
-│   ├── schemas.py         # Pydantic 请求与响应模型（正整数 / 受损区间 / 章节容量 / 装订核对校验）
-│   └── main.py            # FastAPI 路由（拼版、补印、按章节拼版、装订核对）与 400 错误处理
+│   ├── imposition.py      # 分册 / 补齐 / 拼版核心算法 + 补印定位 + 按章节最优分册 + 装订核对 + 手工双面清单（纯标准库）
+│   ├── schemas.py         # Pydantic 请求与响应模型（正整数 / 受损区间 / 章节容量 / 装订核对 / 手工双面选项校验）
+│   └── main.py            # FastAPI 路由（拼版、补印、按章节拼版、装订核对、手工双面清单）与 400 错误处理
 ├── tests/
 │   ├── test_imposition.py # 核心算法单元测试
 │   └── test_api.py        # API 与非法输入测试

@@ -18,6 +18,14 @@
 可合册，在每册页数不超过 ``4 * max_sheets_per_booklet`` 的所有方案中依次最小化
 总纸张数与册数，并以各册结束章节序号序列的字典序裁决并列。
 
+手工双面打印清单（``build_manual_duplex``）：不支持自动双面打印时，每册纸分两轮
+手工送纸——
+
+1. 首轮：纸张从外到内依次打印各自正面；
+2. 把首轮出纸堆原样（或倒序）回填进纸口，再印反面：
+   - 倒序回填（``refill_reversed=True``）时反转第二轮的纸张次序；
+   - 沿长边翻转回填时交换反面左右版面，沿短边翻转时左右保持不变。
+
 装订核对（``build_binding_check``）：以拼版结果为基准核对单册实际纸张。
 每张物理纸允许的摆放方式仅有四种，构成克莱因四元群：
 
@@ -375,6 +383,91 @@ def build_reprint(
         "booklet_count": imposition["booklet_count"],
         "reprint_sheet_count": len(sheets_out),
         "sheets": sheets_out,
+    }
+
+
+def build_manual_duplex(
+    total_pages: int,
+    max_sheets_per_booklet: int,
+    refill_reversed: bool,
+    flip_edge: str,
+) -> dict:
+    """根据现有普通拼版结果，生成每册独立的两轮手工双面打印清单。
+
+    每册纸分两轮手工送纸：
+
+    - **第一轮**：纸张按外到内（``sheet_index`` 升序）打印各自正面，
+      左右版面与拼版结果一致；
+    - **第二轮**：把首轮出纸堆回填进纸口后打印对应反面：
+      - ``refill_reversed`` 为真（倒序回填）时，第二轮纸张次序反转，
+        即从最内侧纸印到最外侧纸；否则与首轮同序；
+      - ``flip_edge="long"``（沿长边翻转回填）时，交换反面的左右版面；
+        ``flip_edge="short"``（沿短边翻转回填）时左右保持不变。
+
+    每条记录给出轮次内序号（``sequence``，从 0 开始）、册号
+    （``booklet_index``）、纸张序号（``sheet_index``，0 为最外侧纸）与
+    该次打印的左右原稿页码，补白沿用 ``None``。
+    """
+    if flip_edge not in ("short", "long"):
+        raise ValueError('flip_edge 必须为 "short"（短边）或 "long"（长边）')
+
+    imposition = build_imposition(total_pages, max_sheets_per_booklet)
+    result_booklets: list[dict] = []
+
+    for booklet in imposition["booklets"]:
+        sheets = booklet["sheets"]
+
+        # 第一轮：外到内打印正面，版面与拼版结果一致。
+        front_entries = [
+            {
+                "sequence": seq,
+                "booklet_index": booklet["index"],
+                "sheet_index": sheet["index"],
+                "left": sheet["front"]["left"],
+                "right": sheet["front"]["right"],
+            }
+            for seq, sheet in enumerate(sheets)
+        ]
+
+        # 第二轮：按回填后的实际入纸顺序打印反面；倒序回填反转纸张次序。
+        back_sheets = list(reversed(sheets)) if refill_reversed else sheets
+        back_entries: list[dict] = []
+        for seq, sheet in enumerate(back_sheets):
+            left = sheet["back"]["left"]
+            right = sheet["back"]["right"]
+            if flip_edge == "long":
+                # 沿长边翻转：反面左右版面互换。
+                left, right = right, left
+            # 沿短边翻转：左右保持不变。
+            back_entries.append(
+                {
+                    "sequence": seq,
+                    "booklet_index": booklet["index"],
+                    "sheet_index": sheet["index"],
+                    "left": left,
+                    "right": right,
+                }
+            )
+
+        result_booklets.append(
+            {
+                "index": booklet["index"],
+                "sheet_count": booklet["sheet_count"],
+                "rounds": [
+                    {"round": 1, "side": "front", "entries": front_entries},
+                    {"round": 2, "side": "back", "entries": back_entries},
+                ],
+            }
+        )
+
+    return {
+        "total_pages": total_pages,
+        "max_sheets_per_booklet": max_sheets_per_booklet,
+        "refill_reversed": refill_reversed,
+        "flip_edge": flip_edge,
+        "booklet_count": imposition["booklet_count"],
+        "total_sheets": imposition["total_sheets"],
+        "booklets": result_booklets,
     }
 
 

@@ -12,6 +12,7 @@ from .imposition import (
     build_binding_check,
     build_chapter_imposition,
     build_imposition,
+    build_manual_duplex,
     build_reprint,
 )
 from .schemas import (
@@ -21,6 +22,8 @@ from .schemas import (
     ChapterImpositionResponse,
     ImpositionRequest,
     ImpositionResponse,
+    ManualDuplexRequest,
+    ManualDuplexResponse,
     ReprintRequest,
     ReprintResponse,
 )
@@ -31,9 +34,10 @@ app = FastAPI(
         "输入原稿总页数与每册最多纸张数，按骑马钉（对折装订）方式分册拼版，"
         "返回每张纸正反面各自的左、右页码；补位页以 null（空白）表示。"
         "亦支持按章节分册：章节不可拆分、仅相邻章节可合册，"
-        "在所有合法分册方案中依次最小化总纸张数与册数。"
+        "在所有合法分册方案中依次最小化总纸张数与册数；"
+        "还可生成每册独立的两轮手工双面打印清单（倒序回填、短边/长边翻转）。"
     ),
-    version="1.2.0",
+    version="1.3.0",
 )
 
 
@@ -50,7 +54,13 @@ def _format_validation_errors(errors: list[dict], path: str = "") -> list[dict]:
         err_type = err.get("type", "")
         message = err.get("msg", "参数不合法。")
 
-        if err_type in {
+        if err_type == "missing":
+            message = "缺少必填参数。"
+        elif field == "refill_reversed":
+            message = "必须为布尔值（true 或 false）。"
+        elif field == "flip_edge":
+            message = '必须为 "short"（短边翻转）或 "long"（长边翻转）。'
+        elif err_type in {
             "int_type",
             "int_parsing",
             "strict_int",
@@ -68,8 +78,6 @@ def _format_validation_errors(errors: list[dict], path: str = "") -> list[dict]:
                 message = "必须为大于等于 1 的正整数。"
         elif err_type == "extra_forbidden":
             message = "存在不支持的多余字段。"
-        elif err_type == "missing":
-            message = "缺少必填参数。"
         elif err_type in {"model_type", "model_attributes_type"}:
             raw_loc = err.get("loc", ())
             if len(raw_loc) >= 2 and "damaged_ranges" in raw_loc:
@@ -122,6 +130,11 @@ async def validation_exception_handler(
             "booklet_index 必须是非负整数，"
             "sheets 必须是非空的纸张列表，每张纸的非空页码必须为正整数。"
         )
+    elif path.startswith("/api/v1/manual-duplex"):
+        message = (
+            "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数，"
+            'refill_reversed 必须是布尔值，flip_edge 必须是 "short" 或 "long"。'
+        )
     else:
         message = (
             "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数。"
@@ -146,6 +159,7 @@ async def root() -> dict:
         "reprint_endpoint": "/api/v1/reprint",
         "chapter_impose_endpoint": "/api/v1/chapter-impose",
         "binding_check_endpoint": "/api/v1/binding-check",
+        "manual_duplex_endpoint": "/api/v1/manual-duplex",
     }
 
 
@@ -268,3 +282,19 @@ async def binding_check(payload: BindingCheckRequest) -> BindingCheckResponse:
             },
         )
     return BindingCheckResponse.model_validate(result)
+
+
+@app.post(
+    "/api/v1/manual-duplex",
+    response_model=ManualDuplexResponse,
+    tags=["imposition"],
+    summary="每册独立的两轮手工双面打印清单",
+)
+async def manual_duplex(payload: ManualDuplexRequest) -> ManualDuplexResponse:
+    result = build_manual_duplex(
+        total_pages=payload.total_pages,
+        max_sheets_per_booklet=payload.max_sheets_per_booklet,
+        refill_reversed=payload.refill_reversed,
+        flip_edge=payload.flip_edge,
+    )
+    return ManualDuplexResponse.model_validate(result)
