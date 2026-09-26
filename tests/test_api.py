@@ -615,5 +615,197 @@ class TestBindingCheckEndpoint(unittest.TestCase):
                 self.assertIn("details", body)
 
 
+class TestManualDuplexEndpoint(unittest.TestCase):
+    URL = "/api/v1/manual-duplex"
+
+    def test_short_edge_no_restack(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 16,
+                "max_sheets_per_booklet": 4,
+                "restack_reversed": False,
+                "flip_edge": "short_edge",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        data = resp.json()
+        self.assertEqual(data["total_pages"], 16)
+        self.assertEqual(data["max_sheets_per_booklet"], 4)
+        self.assertFalse(data["restack_reversed"])
+        self.assertEqual(data["flip_edge"], "short_edge")
+        self.assertEqual(data["booklet_count"], 1)
+        self.assertEqual(data["total_sheets"], 4)
+
+        booklet = data["booklets"][0]
+        self.assertEqual(booklet["index"], 0)
+        self.assertEqual((booklet["start_page"], booklet["end_page"]), (1, 16))
+        self.assertEqual(booklet["sheet_count"], 4)
+        self.assertEqual(
+            [
+                (r["sequence"], r["booklet_index"], r["sheet_index"],
+                 r["left"], r["right"])
+                for r in booklet["first_pass"]
+            ],
+            [
+                (0, 0, 0, 16, 1),
+                (1, 0, 1, 14, 3),
+                (2, 0, 2, 12, 5),
+                (3, 0, 3, 10, 7),
+            ],
+        )
+        self.assertEqual(
+            [
+                (r["sequence"], r["booklet_index"], r["sheet_index"],
+                 r["left"], r["right"])
+                for r in booklet["second_pass"]
+            ],
+            [
+                (0, 0, 0, 2, 15),
+                (1, 0, 1, 4, 13),
+                (2, 0, 2, 6, 11),
+                (3, 0, 3, 8, 9),
+            ],
+        )
+
+    def test_reversed_restack_and_long_edge(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 8,
+                "max_sheets_per_booklet": 2,
+                "restack_reversed": True,
+                "flip_edge": "long_edge",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        booklet = resp.json()["booklets"][0]
+        self.assertEqual(
+            [
+                (r["sequence"], r["sheet_index"], r["left"], r["right"])
+                for r in booklet["first_pass"]
+            ],
+            [(0, 0, 8, 1), (1, 1, 6, 3)],
+        )
+        # 倒序回填：纸张次序反转；长边翻转：反面左右交换
+        self.assertEqual(
+            [
+                (r["sequence"], r["sheet_index"], r["left"], r["right"])
+                for r in booklet["second_pass"]
+            ],
+            [(0, 1, 5, 4), (1, 0, 7, 2)],
+        )
+
+    def test_blank_pages_are_null(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 5,
+                "max_sheets_per_booklet": 10,
+                "restack_reversed": False,
+                "flip_edge": "short_edge",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        booklet = resp.json()["booklets"][0]
+        self.assertIsNone(booklet["first_pass"][0]["left"])
+        self.assertIsNone(booklet["second_pass"][0]["right"])
+
+    def test_multi_booklet_passes(self):
+        resp = client.post(
+            self.URL,
+            json={
+                "total_pages": 17,
+                "max_sheets_per_booklet": 2,
+                "restack_reversed": True,
+                "flip_edge": "short_edge",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        data = resp.json()
+        self.assertEqual(data["booklet_count"], 3)
+        self.assertEqual(data["total_sheets"], 5)
+        # 每册独立两轮，轮次内序号各自从 0 开始，记录均带册号
+        for index, booklet in enumerate(data["booklets"]):
+            self.assertEqual(
+                [r["sequence"] for r in booklet["first_pass"]],
+                list(range(booklet["sheet_count"])),
+            )
+            self.assertEqual(
+                [r["sequence"] for r in booklet["second_pass"]],
+                list(range(booklet["sheet_count"])),
+            )
+            self.assertTrue(
+                all(
+                    r["booklet_index"] == index
+                    for r in booklet["first_pass"] + booklet["second_pass"]
+                )
+            )
+
+    def test_invalid_flip_edge_400(self):
+        for bad in ("short", "LONG_EDGE", "长边", "", 1, None, True):
+            with self.subTest(bad=bad):
+                resp = client.post(
+                    self.URL,
+                    json={
+                        "total_pages": 16,
+                        "max_sheets_per_booklet": 4,
+                        "restack_reversed": False,
+                        "flip_edge": bad,
+                    },
+                )
+                self.assertEqual(resp.status_code, 400)
+                body = resp.json()
+                self.assertEqual(body["error"], "invalid_input")
+                self.assertTrue(
+                    any("flip_edge" in d["field"] for d in body["details"])
+                )
+
+    def test_invalid_restack_reversed_400(self):
+        for bad in ("true", 1, 0, None, "yes"):
+            with self.subTest(bad=bad):
+                resp = client.post(
+                    self.URL,
+                    json={
+                        "total_pages": 16,
+                        "max_sheets_per_booklet": 4,
+                        "restack_reversed": bad,
+                        "flip_edge": "short_edge",
+                    },
+                )
+                self.assertEqual(resp.status_code, 400)
+                body = resp.json()
+                self.assertEqual(body["error"], "invalid_input")
+                self.assertTrue(
+                    any("restack_reversed" in d["field"] for d in body["details"])
+                )
+
+    def test_common_field_validation_400(self):
+        valid = {
+            "total_pages": 16,
+            "max_sheets_per_booklet": 4,
+            "restack_reversed": False,
+            "flip_edge": "short_edge",
+        }
+        cases = [
+            {},  # 缺少必填参数
+            {k: v for k, v in valid.items() if k != "flip_edge"},  # 缺 flip_edge
+            {k: v for k, v in valid.items() if k != "restack_reversed"},
+            {**valid, "total_pages": 0},  # 非正
+            {**valid, "total_pages": 16.0},  # 整数浮点
+            {**valid, "total_pages": True},  # 布尔
+            {**valid, "max_sheets_per_booklet": "4"},  # 数字字符串
+            {**valid, "max_sheets_per_booklet": -1},  # 负数
+            {**valid, "extra": 1},  # 多余字段
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                resp = client.post(self.URL, json=payload)
+                self.assertEqual(resp.status_code, 400, payload)
+                body = resp.json()
+                self.assertEqual(body["error"], "invalid_input")
+                self.assertIn("details", body)
+
+
 if __name__ == "__main__":
     unittest.main()

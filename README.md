@@ -17,6 +17,12 @@
 左右互换 / 正反互换还原的版面返回 **HTTP 400**；核对通过时给出每张纸当前与应在
 位置、所需互换操作，以及恢复外到内顺序的最少两两交换步骤。
 
+另可生成**两轮手工双面打印清单**（`POST /api/v1/manual-duplex`）：面向只能单面
+打印的打印机，按现有拼版结果为每册独立生成两轮打印清单——首轮按从外到内打印
+各纸正面，第二轮按回填后的实际入纸顺序打印对应反面；支持配置首轮出纸堆是否
+**倒序回填**（反转纸张次序）以及回填时**沿短边 / 长边翻转**（长边翻转交换反面
+左右版面）。
+
 > 1 张纸正反两面共 4 个版面，因此骑马钉册的页数永远是 4 的倍数。
 
 ---
@@ -73,6 +79,7 @@ HOST_PORT=9000
 | 补印定位接口（POST） | `POST http://localhost:8000/api/v1/reprint` |
 | 按章节分册拼版接口（POST） | `POST http://localhost:8000/api/v1/chapter-impose` |
 | 装订核对接口（POST） | `POST http://localhost:8000/api/v1/binding-check` |
+| 手工双面打印清单接口（POST） | `POST http://localhost:8000/api/v1/manual-duplex` |
 
 ## 4. 接口说明
 
@@ -496,6 +503,104 @@ curl -X POST http://localhost:8000/api/v1/binding-check \
 }
 ```
 
+### `POST /api/v1/manual-duplex`（两轮手工双面打印清单）
+
+只有单面打印机时，双面打印需分两轮手工完成：首轮印完所有正面后，把出纸堆
+重新放入进纸托（回填），第二轮再印反面。本接口按现有拼版结果为**每册独立**
+生成两轮打印清单：
+
+- **首轮 `first_pass`**：按纸张**从外到内**顺序打印各纸**正面**；
+- **第二轮 `second_pass`**：按**回填后的实际入纸顺序**打印各纸**反面**——
+  - `restack_reversed = true`（首轮出纸堆倒序回填）时，纸张次序**反转**
+    （首轮的最后一张最先入纸）；为 `false` 时次序不变；
+  - `flip_edge = "long_edge"`（回填时沿长边翻转）时纸张调头，反面的
+    **左右版面交换**；`"short_edge"`（沿短边翻转）时左右**保持不变**；
+- 每条记录给出**轮次内序号** `sequence`（从 0 开始，即实际进纸顺序）、
+  **册号** `booklet_index`、**纸张序号** `sheet_index`（0 为该册最外侧纸张）
+  及当次应印的**左右页码** `left` / `right`；补白页沿用 **`null`**。
+
+**请求体（JSON）**
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `total_pages` | 整数 | 必填，正整数 `>= 1` | 原稿总页数（与拼版接口口径一致） |
+| `max_sheets_per_booklet` | 整数 | 必填，正整数 `>= 1` | 每册最多纸张数（与拼版接口口径一致） |
+| `restack_reversed` | 布尔 | 必填，`true` / `false` | 首轮出纸堆是否倒序回填：`true` 时第二轮入纸顺序为首轮的逆序 |
+| `flip_edge` | 字符串 | 必填，`"short_edge"` 或 `"long_edge"` | 回填时的翻转边：短边左右不变，长边交换反面左右版面 |
+
+以下情况一律返回 **HTTP 400**：`total_pages` / `max_sheets_per_booklet` 不是
+正整数、`restack_reversed` 不是布尔值、`flip_edge` 不是 `"short_edge"` /
+`"long_edge"`、缺少必填字段或存在多余字段。
+
+请求示例（8 页、每册 2 张纸；倒序回填 + 沿长边翻转）：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/manual-duplex \
+  -H "Content-Type: application/json" \
+  -d '{
+        "total_pages": 8,
+        "max_sheets_per_booklet": 2,
+        "restack_reversed": true,
+        "flip_edge": "long_edge"
+      }'
+```
+
+响应示例（首轮外到内印正面 `8|1`、`6|3`；倒序回填后第二轮先印第 2 张反面，
+长边翻转使反面左右交换为 `5|4`，再印第 1 张反面 `7|2`）：
+
+```json
+{
+  "total_pages": 8,
+  "max_sheets_per_booklet": 2,
+  "restack_reversed": true,
+  "flip_edge": "long_edge",
+  "booklet_count": 1,
+  "total_sheets": 2,
+  "booklets": [
+    {
+      "index": 0,
+      "start_page": 1,
+      "end_page": 8,
+      "sheet_count": 2,
+      "first_pass": [
+        { "sequence": 0, "booklet_index": 0, "sheet_index": 0, "left": 8, "right": 1 },
+        { "sequence": 1, "booklet_index": 0, "sheet_index": 1, "left": 6, "right": 3 }
+      ],
+      "second_pass": [
+        { "sequence": 0, "booklet_index": 0, "sheet_index": 1, "left": 5, "right": 4 },
+        { "sequence": 1, "booklet_index": 0, "sheet_index": 0, "left": 7, "right": 2 }
+      ]
+    }
+  ]
+}
+```
+
+同样的输入改为 `"restack_reversed": false, "flip_edge": "short_edge"` 时，
+第二轮与首轮同序且反面左右不变：`2|7`、`4|5`。
+
+错误响应示例（`flip_edge` 非法）：
+
+```bash
+curl -i -X POST http://localhost:8000/api/v1/manual-duplex \
+  -H "Content-Type: application/json" \
+  -d '{
+        "total_pages": 16,
+        "max_sheets_per_booklet": 4,
+        "restack_reversed": false,
+        "flip_edge": "middle"
+      }'
+```
+
+```json
+{
+  "error": "invalid_input",
+  "message": "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数，restack_reversed 必须是布尔值，flip_edge 必须是 \"short_edge\"（沿短边翻转）或 \"long_edge\"（沿长边翻转）。",
+  "details": [
+    { "field": "flip_edge", "message": "必须为 \"short_edge\"（沿短边翻转）或 \"long_edge\"（沿长边翻转）。" }
+  ]
+}
+```
+
 ## 5. 拼版规则（打印与装订说明）
 
 对一册补齐到 `n` 页（`n` 为 4 的倍数）的小册子，从外到内第 `i` 张纸
@@ -517,6 +622,12 @@ curl -X POST http://localhost:8000/api/v1/binding-check \
 每册页数不超过 `4 × max_sheets_per_booklet`；在所有合法方案中依次最小化
 总纸张数、册数，并以各册结束章节序号序列的字典序裁决并列。每册独立补齐到
 4 的倍数（可能每册都有补白页），页码为跨册连续的全局原稿页码。
+
+**手工双面打印规则**（`/api/v1/manual-duplex`）：每册独立分两轮打印。首轮按
+从外到内顺序打印各纸正面；随后把出纸堆回填进纸托，第二轮按回填后的实际入纸
+顺序打印各纸反面——倒序回填时纸张次序反转，否则次序不变；回填沿长边翻转时
+反面左右版面交换，沿短边翻转时左右不变。两轮合计印出的版面与
+`/api/v1/impose` 的拼版结果完全一致。
 
 ## 6. 本地开发（不使用 Docker）
 
@@ -542,9 +653,9 @@ python -m unittest discover -s tests -v
 .
 ├── app/
 │   ├── __init__.py
-│   ├── imposition.py      # 分册 / 补齐 / 拼版核心算法 + 补印定位 + 按章节最优分册 + 装订核对（纯标准库）
-│   ├── schemas.py         # Pydantic 请求与响应模型（正整数 / 受损区间 / 章节容量 / 装订核对校验）
-│   └── main.py            # FastAPI 路由（拼版、补印、按章节拼版、装订核对）与 400 错误处理
+│   ├── imposition.py      # 分册 / 补齐 / 拼版核心算法 + 补印定位 + 按章节最优分册 + 装订核对 + 手工双面清单（纯标准库）
+│   ├── schemas.py         # Pydantic 请求与响应模型（正整数 / 受损区间 / 章节容量 / 装订核对 / 手工双面选项校验）
+│   └── main.py            # FastAPI 路由（拼版、补印、按章节拼版、装订核对、手工双面清单）与 400 错误处理
 ├── tests/
 │   ├── test_imposition.py # 核心算法单元测试
 │   └── test_api.py        # API 与非法输入测试

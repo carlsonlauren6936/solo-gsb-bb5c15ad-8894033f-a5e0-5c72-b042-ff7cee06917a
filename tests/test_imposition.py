@@ -9,6 +9,7 @@ from app.imposition import (
     build_binding_check,
     build_chapter_imposition,
     build_imposition,
+    build_manual_duplex,
     build_reprint,
     impose_padded_booklet,
     split_booklets,
@@ -590,6 +591,207 @@ class TestBuildBindingCheck(unittest.TestCase):
         self.assertEqual((result["start_page"], result["end_page"]), (17, 17))
         self.assertEqual(result["sheets"][0]["required_operations"], [])
         self.assertEqual(result["swap_steps"], [])
+
+
+class TestBuildManualDuplex(unittest.TestCase):
+    """两轮手工双面打印清单：基准为 16 页 1 册 4 张纸。"""
+
+    def test_short_edge_no_restack_keeps_order_and_sides(self):
+        result = build_manual_duplex(16, 4, False, "short_edge")
+        self.assertEqual(result["total_pages"], 16)
+        self.assertEqual(result["max_sheets_per_booklet"], 4)
+        self.assertFalse(result["restack_reversed"])
+        self.assertEqual(result["flip_edge"], "short_edge")
+        self.assertEqual(result["booklet_count"], 1)
+        self.assertEqual(result["total_sheets"], 4)
+
+        booklet = result["booklets"][0]
+        self.assertEqual(booklet["index"], 0)
+        self.assertEqual((booklet["start_page"], booklet["end_page"]), (1, 16))
+        self.assertEqual(booklet["sheet_count"], 4)
+        # 首轮：从外到内打印正面
+        self.assertEqual(
+            [
+                (r["sequence"], r["booklet_index"], r["sheet_index"],
+                 r["left"], r["right"])
+                for r in booklet["first_pass"]
+            ],
+            [
+                (0, 0, 0, 16, 1),
+                (1, 0, 1, 14, 3),
+                (2, 0, 2, 12, 5),
+                (3, 0, 3, 10, 7),
+            ],
+        )
+        # 第二轮：不倒序 -> 次序不变；短边 -> 反面左右不变
+        self.assertEqual(
+            [
+                (r["sequence"], r["booklet_index"], r["sheet_index"],
+                 r["left"], r["right"])
+                for r in booklet["second_pass"]
+            ],
+            [
+                (0, 0, 0, 2, 15),
+                (1, 0, 1, 4, 13),
+                (2, 0, 2, 6, 11),
+                (3, 0, 3, 8, 9),
+            ],
+        )
+
+    def test_restack_reversed_reverses_second_pass_order(self):
+        result = build_manual_duplex(16, 4, True, "short_edge")
+        booklet = result["booklets"][0]
+        # 首轮不受回填方式影响
+        self.assertEqual(
+            [r["sheet_index"] for r in booklet["first_pass"]], [0, 1, 2, 3]
+        )
+        # 倒序回填：第二轮按反转后的实际入纸顺序打印反面
+        self.assertEqual(
+            [
+                (r["sequence"], r["sheet_index"], r["left"], r["right"])
+                for r in booklet["second_pass"]
+            ],
+            [
+                (0, 3, 8, 9),
+                (1, 2, 6, 11),
+                (2, 1, 4, 13),
+                (3, 0, 2, 15),
+            ],
+        )
+
+    def test_long_edge_swaps_back_left_right(self):
+        result = build_manual_duplex(16, 4, False, "long_edge")
+        booklet = result["booklets"][0]
+        # 首轮正面不受翻转边影响
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in booklet["first_pass"]],
+            [(16, 1), (14, 3), (12, 5), (10, 7)],
+        )
+        # 长边翻转：反面左右版面交换
+        self.assertEqual(
+            [
+                (r["sheet_index"], r["left"], r["right"])
+                for r in booklet["second_pass"]
+            ],
+            [(0, 15, 2), (1, 13, 4), (2, 11, 6), (3, 9, 8)],
+        )
+
+    def test_reversed_and_long_edge_compose(self):
+        result = build_manual_duplex(16, 4, True, "long_edge")
+        booklet = result["booklets"][0]
+        self.assertEqual(
+            [
+                (r["sequence"], r["sheet_index"], r["left"], r["right"])
+                for r in booklet["second_pass"]
+            ],
+            [
+                (0, 3, 9, 8),
+                (1, 2, 11, 6),
+                (2, 1, 13, 4),
+                (3, 0, 15, 2),
+            ],
+        )
+
+    def test_blank_pages_stay_null(self):
+        # 5 页补齐到 8：外纸正面 空|1，反面 2|空
+        result = build_manual_duplex(5, 10, False, "short_edge")
+        booklet = result["booklets"][0]
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in booklet["first_pass"]],
+            [(None, 1), (None, 3)],
+        )
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in booklet["second_pass"]],
+            [(2, None), (4, 5)],
+        )
+        # 长边翻转时补白位置同样随之交换
+        result_long = build_manual_duplex(5, 10, False, "long_edge")
+        self.assertEqual(
+            [
+                (r["left"], r["right"])
+                for r in result_long["booklets"][0]["second_pass"]
+            ],
+            [(None, 2), (5, 4)],
+        )
+
+    def test_multi_booklet_independent_passes(self):
+        # 17 页、每册 2 张 -> 3 册；每册各自两轮，轮次内序号各自从 0 开始
+        result = build_manual_duplex(17, 2, True, "short_edge")
+        self.assertEqual(result["booklet_count"], 3)
+        for index, booklet in enumerate(result["booklets"]):
+            self.assertEqual(booklet["index"], index)
+            self.assertEqual(
+                [r["sequence"] for r in booklet["first_pass"]],
+                list(range(booklet["sheet_count"])),
+            )
+            self.assertEqual(
+                [r["sequence"] for r in booklet["second_pass"]],
+                list(range(booklet["sheet_count"])),
+            )
+            self.assertTrue(
+                all(
+                    r["booklet_index"] == index
+                    for r in booklet["first_pass"] + booklet["second_pass"]
+                )
+            )
+        # 末册仅 1 张纸（含补白）
+        last = result["booklets"][2]
+        self.assertEqual(last["sheet_count"], 1)
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in last["first_pass"]], [(None, 17)]
+        )
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in last["second_pass"]], [(None, None)]
+        )
+
+    def test_printed_sheets_match_imposition(self):
+        # 两轮合计印出的纸张与拼版结果一致：首轮正面逐面相同；
+        # 第二轮反面页码集合相同（长边翻转仅交换左右，不换纸张与页码）。
+        for restack in (False, True):
+            for edge in ("short_edge", "long_edge"):
+                with self.subTest(restack=restack, edge=edge):
+                    result = build_manual_duplex(17, 2, restack, edge)
+                    imposition = build_imposition(17, 2)
+                    for booklet, expected in zip(
+                        result["booklets"], imposition["booklets"]
+                    ):
+                        fronts = {
+                            (r["sheet_index"], r["left"], r["right"])
+                            for r in booklet["first_pass"]
+                        }
+                        self.assertEqual(
+                            fronts,
+                            {
+                                (
+                                    s["index"],
+                                    s["front"]["left"],
+                                    s["front"]["right"],
+                                )
+                                for s in expected["sheets"]
+                            },
+                        )
+                        backs = {
+                            (r["sheet_index"], frozenset((r["left"], r["right"])))
+                            for r in booklet["second_pass"]
+                        }
+                        self.assertEqual(
+                            backs,
+                            {
+                                (
+                                    s["index"],
+                                    frozenset(
+                                        (s["back"]["left"], s["back"]["right"])
+                                    ),
+                                )
+                                for s in expected["sheets"]
+                            },
+                        )
+
+    def test_invalid_flip_edge_rejected(self):
+        for bad in ("", "short", "LONG_EDGE", "长边", None, 1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    build_manual_duplex(16, 4, False, bad)
 
 
 class TestMinimumSwapSteps(unittest.TestCase):

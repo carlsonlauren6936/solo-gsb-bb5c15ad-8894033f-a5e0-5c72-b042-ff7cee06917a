@@ -12,6 +12,7 @@ from .imposition import (
     build_binding_check,
     build_chapter_imposition,
     build_imposition,
+    build_manual_duplex,
     build_reprint,
 )
 from .schemas import (
@@ -21,6 +22,8 @@ from .schemas import (
     ChapterImpositionResponse,
     ImpositionRequest,
     ImpositionResponse,
+    ManualDuplexRequest,
+    ManualDuplexResponse,
     ReprintRequest,
     ReprintResponse,
 )
@@ -31,9 +34,10 @@ app = FastAPI(
         "输入原稿总页数与每册最多纸张数，按骑马钉（对折装订）方式分册拼版，"
         "返回每张纸正反面各自的左、右页码；补位页以 null（空白）表示。"
         "亦支持按章节分册：章节不可拆分、仅相邻章节可合册，"
-        "在所有合法分册方案中依次最小化总纸张数与册数。"
+        "在所有合法分册方案中依次最小化总纸张数与册数；"
+        "并可生成每册独立的两轮手工双面打印清单（首轮正面、第二轮反面）。"
     ),
-    version="1.2.0",
+    version="1.3.0",
 )
 
 
@@ -57,10 +61,14 @@ def _format_validation_errors(errors: list[dict], path: str = "") -> list[dict]:
             "int_from_float",
             "bool_type",
         }:
-            if field == "booklet_index":
+            if field == "restack_reversed":
+                message = "必须为布尔值（true 或 false，不接受数字、字符串或空值）。"
+            elif field == "booklet_index":
                 message = "必须为非负整数（不接受小数、布尔值、字符串或空值）。"
             else:
                 message = "必须为正整数（不接受小数、布尔值、字符串或空值）。"
+        elif err_type == "literal_error":
+            message = '必须为 "short_edge"（沿短边翻转）或 "long_edge"（沿长边翻转）。'
         elif err_type in {"greater_than_equal", "ge"}:
             if field == "booklet_index":
                 message = "必须为大于等于 0 的非负整数。"
@@ -122,6 +130,12 @@ async def validation_exception_handler(
             "booklet_index 必须是非负整数，"
             "sheets 必须是非空的纸张列表，每张纸的非空页码必须为正整数。"
         )
+    elif path.startswith("/api/v1/manual-duplex"):
+        message = (
+            "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数，"
+            "restack_reversed 必须是布尔值，"
+            'flip_edge 必须是 "short_edge"（沿短边翻转）或 "long_edge"（沿长边翻转）。'
+        )
     else:
         message = (
             "输入参数校验失败：total_pages 与 max_sheets_per_booklet 必须是正整数。"
@@ -146,6 +160,7 @@ async def root() -> dict:
         "reprint_endpoint": "/api/v1/reprint",
         "chapter_impose_endpoint": "/api/v1/chapter-impose",
         "binding_check_endpoint": "/api/v1/binding-check",
+        "manual_duplex_endpoint": "/api/v1/manual-duplex",
     }
 
 
@@ -268,3 +283,19 @@ async def binding_check(payload: BindingCheckRequest) -> BindingCheckResponse:
             },
         )
     return BindingCheckResponse.model_validate(result)
+
+
+@app.post(
+    "/api/v1/manual-duplex",
+    response_model=ManualDuplexResponse,
+    tags=["imposition"],
+    summary="两轮手工双面打印清单（每册独立：首轮正面、第二轮反面）",
+)
+async def manual_duplex(payload: ManualDuplexRequest) -> ManualDuplexResponse:
+    result = build_manual_duplex(
+        total_pages=payload.total_pages,
+        max_sheets_per_booklet=payload.max_sheets_per_booklet,
+        restack_reversed=payload.restack_reversed,
+        flip_edge=payload.flip_edge,
+    )
+    return ManualDuplexResponse.model_validate(result)

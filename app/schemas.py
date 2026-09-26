@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     ValidationInfo,
     field_validator,
@@ -293,3 +294,72 @@ class BindingCheckResponse(BaseModel):
             "依次执行后整叠纸恢复为基准的从外到内顺序。"
         ),
     )
+
+
+class ManualDuplexRequest(BaseModel):
+    """两轮手工双面打印清单请求。
+
+    ``restack_reversed`` 表示首轮出纸堆是否倒序回填（决定第二轮的实际入纸
+    顺序）；``flip_edge`` 仅接受 ``"short_edge"``（沿短边翻转，反面左右不变）
+    或 ``"long_edge"``（沿长边翻转，反面左右交换）。
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    total_pages: StrictInt = Field(
+        ..., ge=1, description="原稿总页数，必须为正整数。", examples=[16]
+    )
+    max_sheets_per_booklet: StrictInt = Field(
+        ...,
+        ge=1,
+        description="每册最多纸张数（1 张纸正反 4 个版面），必须为正整数。",
+        examples=[4],
+    )
+    restack_reversed: StrictBool = Field(
+        ...,
+        description="首轮出纸堆是否倒序回填：true 时第二轮入纸顺序为首轮的逆序。",
+        examples=[False],
+    )
+    flip_edge: Literal["short_edge", "long_edge"] = Field(
+        ...,
+        description=(
+            '回填时的翻转边："short_edge" 沿短边（反面左右不变），'
+            '"long_edge" 沿长边（反面左右交换）。'
+        ),
+        examples=["short_edge"],
+    )
+
+
+class ManualDuplexRecord(BaseModel):
+    """一轮中的一条打印记录：某册某张纸当次应印的左右页码。"""
+
+    sequence: int = Field(..., description="轮次内序号，从 0 开始，即实际进纸顺序。")
+    booklet_index: int = Field(..., description="分册序号，从 0 开始。")
+    sheet_index: int = Field(..., description="纸张序号，0 为该册最外侧纸张。")
+    left: int | None = Field(..., description="当次应印左侧页码；null 表示空白页。")
+    right: int | None = Field(..., description="当次应印右侧页码；null 表示空白页。")
+
+
+class ManualDuplexBooklet(BaseModel):
+    index: int = Field(..., description="分册序号，从 0 开始。")
+    start_page: int = Field(..., description="本册起始原稿页码（含）。")
+    end_page: int = Field(..., description="本册结束原稿页码（含）。")
+    sheet_count: int = Field(..., description="本册实际用纸张数。")
+    first_pass: list[ManualDuplexRecord] = Field(
+        ..., description="首轮：按从外到内顺序打印各纸正面。"
+    )
+    second_pass: list[ManualDuplexRecord] = Field(
+        ..., description="第二轮：按回填后的实际入纸顺序打印各纸反面。"
+    )
+
+
+class ManualDuplexResponse(BaseModel):
+    total_pages: int
+    max_sheets_per_booklet: int
+    restack_reversed: bool = Field(..., description="首轮出纸堆是否倒序回填。")
+    flip_edge: str = Field(
+        ..., description='回填时的翻转边（"short_edge" / "long_edge"）。'
+    )
+    booklet_count: int = Field(..., description="分册数量。")
+    total_sheets: int = Field(..., description="全部册合计用纸张数。")
+    booklets: list[ManualDuplexBooklet]
